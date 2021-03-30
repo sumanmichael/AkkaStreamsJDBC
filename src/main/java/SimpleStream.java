@@ -1,6 +1,7 @@
 import akka.Done;
 import akka.NotUsed;
 import akka.actor.ActorSystem;
+import akka.stream.OverflowStrategy;
 import akka.stream.alpakka.slick.javadsl.Slick;
 import akka.stream.alpakka.slick.javadsl.SlickRow;
 import akka.stream.alpakka.slick.javadsl.SlickSession;
@@ -45,6 +46,7 @@ public class SimpleStream {
                 16,
                 // add an optional second argument to specify the parallelism factor (int)
                 (user, connection) -> {
+
                     PreparedStatement statement =
                             connection.prepareStatement(
                                     "INSERT INTO target VALUES (?, ?)");
