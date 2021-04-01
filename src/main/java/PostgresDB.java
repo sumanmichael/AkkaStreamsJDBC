@@ -3,7 +3,6 @@ import org.apache.logging.log4j.Logger;
 import org.postgresql.copy.CopyIn;
 import org.postgresql.copy.CopyManager;
 import org.postgresql.jdbc.PgConnection;
-import utils.UserProperties;
 import utils.QueryHelper;
 
 import java.io.ByteArrayOutputStream;
@@ -34,11 +33,17 @@ public class PostgresDB {
         this.props = props;
         this.connection = initiateConnection(url, props);
 
-        fetchSize = Integer.parseInt(UserProperties.getProps().getProperty("fetchSize","5000"));
-        numberOfThreads = Integer.parseInt(UserProperties.getProps().getProperty("numberOfThreads","4"));
+//        fetchSize = Integer.parseInt(UserProperties.getProps().getProperty("fetchSize","5000"));
+        fetchSize = 5000;
+        numberOfThreads = 4;
     }
 
     private Connection initiateConnection(String url, Properties props) throws SQLException {
+        try {
+            Class.forName("org.postgresql.Driver");
+        } catch (ClassNotFoundException e) {
+            e.printStackTrace();
+        }
         Connection connection = DriverManager.getConnection(url, props);
         connection.setAutoCommit(false);
         return connection;
@@ -170,12 +175,7 @@ public class PostgresDB {
                         if (!resultSet.wasNull() || colValue != null) cols.append(colValue);
                     }
 
-
-                    int escapeInSink = Integer.parseInt(UserProperties.getProps().getProperty("escapeInSink","0"));
-                    if (escapeInSink!=0)
-                        row.append(cols.toString().replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\u0000", ""));
-                    else
-                        row.append(cols.toString());
+                    row.append(cols.toString());
 
                     // Row ends with \n
                     row.append("\n");
@@ -250,11 +250,7 @@ public class PostgresDB {
         for (int i = 1; i <= columnsNumber; i++) {
             if (i > 1) columnNames.append(",");
 
-            int quotedIdentifiers = Integer.parseInt(UserProperties.getProps().getProperty("quotedIdentifiers","0"));
-            if (quotedIdentifiers!=0)
-                columnNames.append("\"").append(rsmd.getColumnName(i)).append("\"");
-            else
-                columnNames.append(rsmd.getColumnName(i));
+            columnNames.append(rsmd.getColumnName(i));
 
         }
         return columnNames.toString();

@@ -49,7 +49,7 @@ public class SimpleStream {
 
                     PreparedStatement statement =
                             connection.prepareStatement(
-                                    "INSERT INTO target VALUES (?, ?)");
+                                    "INSERT INTO target VALUES (?, ?, 1)");
                     statement.setInt(1, user.id);
                     statement.setString(2, user.name);
                     return statement;

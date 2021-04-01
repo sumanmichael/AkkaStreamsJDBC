@@ -9,6 +9,7 @@ import scala.Tuple2;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.sql.SQLException;
+import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.CompletionStage;
 
@@ -28,8 +29,10 @@ public class BOSStream {
         PostgresDB sourceDB = new PostgresDB(sourceUrl,props);
         PostgresDB sinkDB = new PostgresDB(sinkUrl,props);
 
+
+
         Source<Tuple2<ByteArrayOutputStream, Integer>, NotUsed> source = Source.range(0,25).map(taskId -> {
-            ByteArrayOutputStream bout = sourceDB.readTableUsingCopy("users", null, taskId);
+            ByteArrayOutputStream bout = sourceDB.readTableUsingCopy("source", null, taskId);
             System.out.println("Read:"+taskId);
             Tuple2<ByteArrayOutputStream, Integer> t2 = new Tuple2(bout,taskId);
             return t2;
@@ -43,9 +46,11 @@ public class BOSStream {
         CompletionStage<Done> done = source.toMat(sink.async(), Keep.right()).run(actorSystem);
 
         done.whenComplete((done1,throwable)->{
+
            actorSystem.terminate();
         });
 
     }
+
 
 }
