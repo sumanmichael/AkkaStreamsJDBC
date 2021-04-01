@@ -14,7 +14,9 @@ import org.postgresql.jdbc.PgConnection;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.sql.Types;
 import java.util.List;
 import java.util.Properties;
@@ -24,17 +26,9 @@ import java.util.concurrent.CompletionStage;
 public class GroupedRowStream {
 
     public static void main(String[] args) throws IOException, SQLException {
-        Properties props = new Properties();
-        props.setProperty("user","postgres");
-        props.setProperty("password","postgres");
 
-        String sourceUrl = "jdbc:postgresql:postgres";
-        String sinkUrl = "jdbc:postgresql:postgres";
-        String tableName = "emp";
 
         ActorSystem actorSystem = ActorSystem.create();
-        PostgresDB sourceDB = new PostgresDB(sourceUrl,props);
-        PostgresDB sinkDB = new PostgresDB(sinkUrl,props);
 
         class DBRow{
             int a;
@@ -62,6 +56,7 @@ public class GroupedRowStream {
 //        Source< DBRow, NotUsed> source = Source.range(1,297,3).map((i) -> new DBRow(i,i+1,i+2));
 
         final SlickSession sourceSession = SlickSession.forConfig("slick-postgres-source");
+        final SlickSession sinkSession = SlickSession.forConfig("slick-postgres-sink");
 
         Source<DBRow, NotUsed> slickSource = Slick.source(
                 sourceSession,
@@ -72,80 +67,85 @@ public class GroupedRowStream {
 
 //        Flow<DBRow,List<DBRow>, NotUsed> groupingFlow = Flow.of(DBRow.class).grouped(3);
 
-        Sink<List<DBRow>,CompletionStage<Done>> sink = Sink.foreach((dbrows)->{
-            CopyIn copyIn = null;
-            try {
-                PgConnection copyOperationConnection = sinkDB.getConnection().unwrap(PgConnection.class);
-                CopyManager copyManager = new CopyManager(copyOperationConnection);
-                String allColumns = null;
-                String targetTableName = "target";
-                String copyCmd = getCopyCommand(targetTableName, allColumns);
-                copyIn = copyManager.copyIn(copyCmd);
+        Sink<List<DBRow>,CompletionStage<Done>> sink = Slick.sink(
+                sinkSession,
+                (dbrows,connection)->{
+                    CopyIn copyIn = null;
+                    try {
+                        PgConnection copyOperationConnection = connection.unwrap(PgConnection.class);
+                        CopyManager copyManager = new CopyManager(copyOperationConnection);
+                        String allColumns = null;
+                        String targetTableName = "target";
+                        String copyCmd = getCopyCommand(targetTableName, allColumns);
+                        copyIn = copyManager.copyIn(copyCmd);
 
-                char unitSeparator = 0x1F;
-                int columnsNumber = 3;
+                        char unitSeparator = 0x1F;
+                        int columnsNumber = 3;
 
-                StringBuilder row = new StringBuilder();
-                StringBuilder cols = new StringBuilder();
+                        StringBuilder row = new StringBuilder();
+                        StringBuilder cols = new StringBuilder();
 
-                byte[] bytes;
-                String colValue;
+                        byte[] bytes;
+                        String colValue;
 
-                for(DBRow r : dbrows){
-                        // Get Columns values
-                        for (int i = 1; i <= columnsNumber; i++) {
-                            if (i > 1) cols.append(unitSeparator);
+                        for(DBRow r : dbrows){
+                            // Get Columns values
+                            for (int i = 1; i <= columnsNumber; i++) {
+                                if (i > 1) cols.append(unitSeparator);
 
-                            switch (Types.INTEGER) {
+                                switch (Types.INTEGER) {
 //                          TODO: Resolve Other Types
-                                default:
-                                    colValue = r.row.get(i-1).toString();
-                                    break;
+                                    default:
+                                        colValue = r.row.get(i-1).toString();
+                                        break;
+                                }
+
+                                if (colValue != null) cols.append(colValue);
                             }
 
-                            if (colValue != null) cols.append(colValue);
+
+                            row.append(cols.toString());
+
+                            // Row ends with \n
+                            row.append("\n");
+
+                            // Copy data to postgres
+                            bytes = row.toString().getBytes(StandardCharsets.UTF_8);
+                            copyIn.writeToCopy(bytes, 0, bytes.length);
+
+                            // Clear StringBuilders
+                            row.setLength(0); // set length of buffer to 0
+                            row.trimToSize();
+                            cols.setLength(0); // set length of buffer to 0
+                            cols.trimToSize();
                         }
 
-
-                        row.append(cols.toString());
-
-                        // Row ends with \n
-                        row.append("\n");
-
-                        // Copy data to postgres
-                        bytes = row.toString().getBytes(StandardCharsets.UTF_8);
-                        copyIn.writeToCopy(bytes, 0, bytes.length);
-
-                        // Clear StringBuilders
-                        row.setLength(0); // set length of buffer to 0
-                        row.trimToSize();
-                        cols.setLength(0); // set length of buffer to 0
-                        cols.trimToSize();
+                        copyIn.endCopy();
+                    } catch (Exception e) {
+                        System.out.println(e);
+                        if (copyIn != null && copyIn.isActive()) {
+                            copyIn.cancelCopy();
+                        }
+//                        connection.rollback();
+                        e.printStackTrace();
+                    } finally {
+                        if (copyIn != null && copyIn.isActive()) {
+                            copyIn.cancelCopy();
+                        }
                     }
-
-                copyIn.endCopy();
-            } catch (Exception e) {
-                if (copyIn != null && copyIn.isActive()) {
-                    copyIn.cancelCopy();
+                    PreparedStatement statement = connection.prepareStatement("update target set a = 1 where 1=0");
+                    return statement;
                 }
-                sinkDB.getConnection().rollback();
-                 e.printStackTrace();
-            } finally {
-                if (copyIn != null && copyIn.isActive()) {
-                    copyIn.cancelCopy();
-                }
-            }
-            sinkDB.getConnection().commit();
-        });
+        );
 
         long startTime = System.currentTimeMillis();
 
         CompletionStage<Done> done =
-                                    slickSource
-                                    .grouped(50000).async()
-                                    .toMat(sink, Keep.right())
+                slickSource
+                        .grouped(20000).async()
+                        .toMat(sink, Keep.right())
 //                                    .toMat(Sink.foreach(System.out::println), Keep.right())
-                                    .run(actorSystem);
+                        .run(actorSystem);
 
         done.whenComplete((done1,throwable)->{
             System.out.println("Total Time:"+(System.currentTimeMillis() - startTime));
