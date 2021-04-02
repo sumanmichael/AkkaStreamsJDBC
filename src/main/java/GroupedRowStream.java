@@ -12,149 +12,85 @@ import org.postgresql.copy.CopyIn;
 import org.postgresql.copy.CopyManager;
 import org.postgresql.jdbc.PgConnection;
 
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.sql.PreparedStatement;
-import java.sql.SQLException;
-import java.sql.Statement;
-import java.sql.Types;
-import java.util.List;
-import java.util.Properties;
+import java.sql.*;
+import java.util.*;
 import java.util.concurrent.CompletionStage;
 
 
 public class GroupedRowStream {
 
-    public static void main(String[] args) throws IOException, SQLException {
 
-
+    public void migrateThroughStream(String sourceTableName, String sinkTableName) throws SQLException {
         ActorSystem actorSystem = ActorSystem.create();
 
-        class DBRow{
-            int a;
-            int b;
-            int c;
-            List<Integer> row;
+        SlickSession sourceSession = SlickSession.forConfig("slick-postgres-source");
+        SlickSession sinkSession = SlickSession.forConfig("slick-postgres-sink");
 
-            public DBRow(int a, int b, int c) {
-                this.a = a;
-                this.b = b;
-                this.c = c;
-                this.row = List.of(a,b,c);
-            }
+        Map<String, JDBCType> columnsMetaData = getColumnsMetaData(sinkSession,sourceTableName);
 
-            @Override
-            public String toString() {
-                return "DBRow{" +
-                        "a=" + a +
-                        ", b=" + b +
-                        ", c=" + c +
-                        '}';
-            }
-        }
+        String allColumns = null;
+        String copyCmd = getCopyCommand(sinkTableName, allColumns);
 
-//        Source< DBRow, NotUsed> source = Source.range(1,297,3).map((i) -> new DBRow(i,i+1,i+2));
-
-        final SlickSession sourceSession = SlickSession.forConfig("slick-postgres-source");
-        final SlickSession sinkSession = SlickSession.forConfig("slick-postgres-sink");
-
-        Source<DBRow, NotUsed> slickSource = Slick.source(
+        Source<String, NotUsed> slickSource = Slick.source(
                 sourceSession,
-                "SELECT * from source;",
-                (SlickRow row) -> {
-                    return new DBRow(row.nextInt(), row.nextInt(), 0);
-                });
-
-//        Flow<DBRow,List<DBRow>, NotUsed> groupingFlow = Flow.of(DBRow.class).grouped(3);
-
-        Sink<List<DBRow>,CompletionStage<Done>> sink = Slick.sink(
-                sinkSession,
-                (dbrows,connection)->{
-                    CopyIn copyIn = null;
-                    try {
-                        PgConnection copyOperationConnection = connection.unwrap(PgConnection.class);
-                        CopyManager copyManager = new CopyManager(copyOperationConnection);
-                        String allColumns = null;
-                        String targetTableName = "target";
-                        String copyCmd = getCopyCommand(targetTableName, allColumns);
-                        copyIn = copyManager.copyIn(copyCmd);
-
-                        char unitSeparator = 0x1F;
-                        int columnsNumber = 3;
-
-                        StringBuilder row = new StringBuilder();
-                        StringBuilder cols = new StringBuilder();
-
-                        byte[] bytes;
-                        String colValue;
-
-                        for(DBRow r : dbrows){
-                            // Get Columns values
-                            for (int i = 1; i <= columnsNumber; i++) {
-                                if (i > 1) cols.append(unitSeparator);
-
-                                switch (Types.INTEGER) {
-//                          TODO: Resolve Other Types
-                                    default:
-                                        colValue = r.row.get(i-1).toString();
-                                        break;
-                                }
-
-                                if (colValue != null) cols.append(colValue);
-                            }
-
-
-                            row.append(cols.toString());
-
-                            // Row ends with \n
-                            row.append("\n");
-
-                            // Copy data to postgres
-                            bytes = row.toString().getBytes(StandardCharsets.UTF_8);
-                            copyIn.writeToCopy(bytes, 0, bytes.length);
-
-                            // Clear StringBuilders
-                            row.setLength(0); // set length of buffer to 0
-                            row.trimToSize();
-                            cols.setLength(0); // set length of buffer to 0
-                            cols.trimToSize();
-                        }
-
-                        copyIn.endCopy();
-                    } catch (Exception e) {
-                        System.out.println(e);
-                        if (copyIn != null && copyIn.isActive()) {
-                            copyIn.cancelCopy();
-                        }
-//                        connection.rollback();
-                        e.printStackTrace();
-                    } finally {
-                        if (copyIn != null && copyIn.isActive()) {
-                            copyIn.cancelCopy();
-                        }
-                    }
-                    PreparedStatement statement = connection.prepareStatement("update target set a = 1 where 1=0");
-                    return statement;
-                }
+                "SELECT * from "+sourceTableName+";",
+                (SlickRow row) -> getStringFromRow(columnsMetaData, row)
         );
 
-        long startTime = System.currentTimeMillis();
+        Flow<String,List<String>, NotUsed> groupingFlow = Flow.of(String.class).grouped(20000);
 
-        CompletionStage<Done> done =
-                slickSource
-                        .grouped(20000).async()
-                        .toMat(sink, Keep.right())
-//                                    .toMat(Sink.foreach(System.out::println), Keep.right())
-                        .run(actorSystem);
+        Sink<List<String>,CompletionStage<Done>> sink = Slick.sink(sinkSession,(dbrows, connection) -> this.insertRowsUsingCopy(dbrows,connection, copyCmd));
+
+        long startTime = System.currentTimeMillis();
+        CompletionStage<Done> done = slickSource
+                                            .via(groupingFlow)
+                                            .toMat(sink, Keep.right())
+                                            .run(actorSystem);
 
         done.whenComplete((done1,throwable)->{
             System.out.println("Total Time:"+(System.currentTimeMillis() - startTime));
+            throwable.printStackTrace();
             actorSystem.terminate();
         });
 
     }
 
-    private static String getCopyCommand(String tableName, String allColumns) {
+    private String getStringFromRow(Map<String, JDBCType> columnsMetaData, SlickRow row) {
+        List<String> cols = new Vector<>(columnsMetaData.size());
+        for(JDBCType type: columnsMetaData.values()){
+            switch (type){
+                case INTEGER:
+                case NUMERIC:
+                    cols.add(row.nextInt().toString());
+                    break;
+                case VARCHAR:
+                    cols.add(row.nextString());
+                    break;
+            }
+        }
+        char unitSeparator = 0x1F;
+        return String.join(Character.toString(unitSeparator),cols);
+    }
+
+    private Map<String, JDBCType> getColumnsMetaData(SlickSession slickSession, String tableName) throws SQLException {
+        Map<String, JDBCType> columnsMetaData = new LinkedHashMap<>();
+        Connection conn =slickSession.db().createSession().conn();
+        DatabaseMetaData databaseMetaData = conn.getMetaData();
+        ResultSet columns = databaseMetaData.getColumns(null,null,tableName,null);
+        while(columns.next()){
+//            System.out.println(columns.getType());
+//            System.out.println(columns.getInt("DATA_TYPE"));
+            columnsMetaData.put(
+                    columns.getString("COLUMN_NAME"),
+                    JDBCType.valueOf(columns.getInt("DATA_TYPE"))
+            );
+        }
+        conn.close();
+        return columnsMetaData;
+    }
+
+    private String getCopyCommand(String tableName, String allColumns) {
 
         StringBuilder copyCmd = new StringBuilder();
 
@@ -174,5 +110,53 @@ public class GroupedRowStream {
         return copyCmd.toString();
     }
 
+    private PreparedStatement insertRowsUsingCopy(List<String> dbrows, Connection connection, String copyCmd) throws SQLException {
+        CopyIn copyIn = null;
+        try {
+            PgConnection copyOperationConnection = connection.unwrap(PgConnection.class);
+            CopyManager copyManager = new CopyManager(copyOperationConnection);
+            copyIn = copyManager.copyIn(copyCmd);
+
+
+            StringBuilder row = new StringBuilder();
+
+            byte[] bytes;
+
+            for (String colString : dbrows) {
+                row.append(colString);
+                row.append("\n");
+
+                // Copy data to postgres
+                bytes = row.toString().getBytes(StandardCharsets.UTF_8);
+                copyIn.writeToCopy(bytes, 0, bytes.length);
+
+                // Clear StringBuilders
+                row.setLength(0);
+                row.trimToSize();
+            }
+
+            copyIn.endCopy();
+        } catch (Exception e) {
+            if (copyIn != null && copyIn.isActive()) {
+                copyIn.cancelCopy();
+            }
+            connection.rollback();
+            e.printStackTrace();
+            throw e;
+        } finally {
+            if (copyIn != null && copyIn.isActive()) {
+                copyIn.cancelCopy();
+            }
+        }
+//        TODO: auto commit off
+//        connection.commit();
+
+        PreparedStatement statement = connection.prepareStatement("update target set a = 1 where 1=0");
+        return statement;
+    }
+
+    public static void main(String[] args) throws SQLException {
+        new GroupedRowStream().migrateThroughStream("source","target");
+    }
 
 }
